@@ -38,10 +38,12 @@ archives both load with no key in source.
 
 import re
 import struct
+import subprocess
+import threading
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from ..zipcrypto import ZipDecryptor
 from .keystore import KeyTriple
@@ -257,6 +259,84 @@ class SpakArchive:
     if info is None:
       raise KeyError(f"{entry!r} not found in {self.path.name!r}")
     return self._inflate(self._read_stored(info), info, self.key)
+
+  def decrypt_copy(
+    self, dest: Path, should_cancel: Optional[Callable[[], bool]] = None
+  ) -> bool:
+    """Write a password-stripped copy of this archive to *dest*.
+
+    `read()`'s per-entry decrypt is this module's own ZipCrypto (a pure
+    Python stream cipher, ~0.5 MB/s -- fine for opening one file in the
+    browser, not for bulk-extracting a whole archive: measured ~100x
+    slower than this). This instead hands the already-known key to the
+    bundled `bkcrack` (compiled C++) via its `-D`/`--decrypt` mode, which
+    decrypts every entry in one pass and writes a plain zip with the same
+    names/layout, readable with no key at all (verified byte-for-byte
+    identical to decrypting entry by entry).
+
+    Raises ``BkcrackUnavailable`` if bkcrack isn't bundled for this host,
+    or ``RuntimeError`` if it exits non-zero -- callers should catch both
+    and fall back to plain `read()`. Returns False if `should_cancel()`
+    turned true before bkcrack finished (the process is killed; *dest*
+    is then incomplete/absent and should be ignored), True on success.
+    """
+    if self.key is None:
+      raise ValueError(f"{self.path.name!r} isn't encrypted; nothing to decrypt")
+
+    # Lazy: only the crack/native-decrypt path needs it.
+    from ...vendor import bkcrack_path
+
+    bk = bkcrack_path()
+    k0, k1, k2 = self._key_triple(self.key)
+    proc = subprocess.Popen(
+      [
+        str(bk),
+        "-C",
+        str(self.path),
+        "-k",
+        f"{k0:x}",
+        f"{k1:x}",
+        f"{k2:x}",
+        "-D",
+        str(dest),
+      ],
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+    )
+    # Drain stdout continuously on its own thread: bkcrack reports
+    # progress as it goes, and on a big enough archive that output could
+    # fill the OS pipe buffer -- which would deadlock a plain `wait()`
+    # (bkcrack blocked writing, us blocked waiting for it to exit).
+    lines: List[str] = []
+    reader = threading.Thread(
+      target=lambda: lines.extend(proc.stdout) if proc.stdout else None, daemon=True
+    )
+    reader.start()
+    try:
+      while True:
+        try:
+          proc.wait(timeout=0.2)
+          break
+        except subprocess.TimeoutExpired:
+          if should_cancel is not None and should_cancel():
+            proc.kill()
+            proc.wait()
+            return False
+    finally:
+      reader.join(timeout=2)
+    if proc.returncode != 0:
+      output = "".join(lines)
+      raise RuntimeError(f"bkcrack failed to decrypt {self.path.name!r}: {output}")
+    return True
+
+  @staticmethod
+  def _key_triple(key: KeyMaterial) -> Tuple[int, int, int]:
+    """The three ZipCrypto internal keys *key* represents, for bkcrack's
+    `-k` (which only speaks keys, not passwords)."""
+    if isinstance(key, (bytes, bytearray)):
+      return ZipDecryptor(bytes(key)).keys
+    return (key[0], key[1], key[2])
 
   def close(self) -> None:
     self._fp.close()

@@ -15,6 +15,7 @@ inside a mounted `.spak`.
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Pattern, Tuple
 
 from ...vfs import Resource
@@ -31,11 +32,14 @@ class ContentContext:
   `resource` is the opened file (disk or archive entry). `open_file`
   opens a (usually sibling) resource in a new tab — used by the map view
   to jump to an object's `.ms1`/`.tex`, and by the spak browser to open
-  an archive entry.
+  an archive entry. `output_dir` is the CLI's `-o` default, used to seed
+  the "Extract" save dialogs (None -> fall back to the resource's own
+  directory).
   """
 
   resource: Resource
   open_file: Callable[[Resource], None]
+  output_dir: Optional[Path] = None
 
 
 # Optional custom view: (asset, context) -> QWidget. When absent, the

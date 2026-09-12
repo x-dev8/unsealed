@@ -88,7 +88,7 @@ def _inner_view(
   handler = for_resource(resource)
   if handler is not None:
     asset = handler.decode(resource)
-    inner_ctx = ContentContext(resource, ctx.open_file)
+    inner_ctx = ContentContext(resource, ctx.open_file, ctx.output_dir)
     widget = (
       handler.view(asset, inner_ctx)
       if handler.view is not None

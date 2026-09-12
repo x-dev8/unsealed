@@ -51,6 +51,12 @@ class ZipDecryptor:
     self._k2 = k2 & 0xFFFFFFFF
     return self
 
+  @property
+  def keys(self) -> tuple:
+    """The three internal keys, e.g. to hand a password-derived key to
+    something that only speaks keys (``bkcrack -k``, ``from_keys``)."""
+    return (self._k0, self._k1, self._k2)
+
   def _update(self, ch: int) -> None:
     self._k0 = (self._k0 >> 8) ^ self._CRC32_TABLE[(self._k0 ^ ch) & 0xFF]
     self._k1 = (self._k1 + (self._k0 & 0xFF)) & 0xFFFFFFFF

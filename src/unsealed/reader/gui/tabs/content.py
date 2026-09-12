@@ -3,10 +3,20 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+  QFileDialog,
+  QHBoxLayout,
+  QLabel,
+  QMessageBox,
+  QPlainTextEdit,
+  QPushButton,
+  QVBoxLayout,
+  QWidget,
+)
 
 from ...vfs import Resource
 from ..content import AssetTree, ContentContext, Node, for_resource
+from ..content.extract import extract_bytes
 
 
 class ContentTab(QWidget):
@@ -20,6 +30,12 @@ class ContentTab(QWidget):
   handlers open both. Falls back to a placeholder for formats without a
   handler yet, or an error view (with traceback) when decoding fails —
   both useful when the point is to debug a file's structure.
+
+  A header "Extract" button saves this resource to disk (decoding the
+  binary `.edt`/`.dat` wrappers to CSV first — see `content/extract.py`).
+  A `.spak` has no such button here: it gets its own "Extract All" in
+  `SpakView`, since extracting a whole archive means a folder of files,
+  not one.
   """
 
   def __init__(
@@ -36,7 +52,26 @@ class ContentTab(QWidget):
 
     layout = QVBoxLayout(self)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.addWidget(self._build_body())
+    layout.setSpacing(0)
+    header = self._build_header()
+    if header is not None:
+      layout.addWidget(header)
+    layout.addWidget(self._build_body(), stretch=1)
+
+  def _build_header(self) -> QWidget | None:
+    if self.resource.suffix.lower() == ".spak":
+      return None  # the archive browser has its own "Extract All"
+    bar = QWidget()
+    bar.setObjectName("contentHeader")
+    box = QHBoxLayout(bar)
+    box.setContentsMargins(10, 6, 10, 6)
+    box.addStretch(1)
+    button = QPushButton("Extract…")
+    button.setObjectName("extractButton")
+    button.setToolTip("Save this file to your computer")
+    button.clicked.connect(self._extract)
+    box.addWidget(button)
+    return bar
 
   def _build_body(self) -> QWidget:
     handler = for_resource(self.resource)
@@ -46,11 +81,32 @@ class ContentTab(QWidget):
       )
     try:
       asset = handler.decode(self.resource)
+      ctx = ContentContext(self.resource, self._open_file, self.output_dir)
       if handler.view is not None:
-        return handler.view(asset, ContentContext(self.resource, self._open_file))
+        return handler.view(asset, ctx)
       return AssetTree(Node(handler.name, asset, handler.name))
     except Exception:
       return self._error(traceback.format_exc())
+
+  def _extract(self) -> None:
+    try:
+      data, suggested = extract_bytes(self.resource)
+    except Exception:
+      QMessageBox.critical(self, "Couldn't extract", traceback.format_exc())
+      return
+    disk_path = self.resource.disk_path
+    base_dir = (
+      self.output_dir or (disk_path.parent if disk_path else None) or Path.home()
+    )
+    path, _ = QFileDialog.getSaveFileName(
+      self, "Extract File", str(Path(base_dir) / suggested), "All Files (*)"
+    )
+    if not path:
+      return
+    try:
+      Path(path).write_bytes(data)
+    except OSError as exc:
+      QMessageBox.critical(self, "Couldn't extract", str(exc))
 
   def _placeholder(self, message: str) -> QWidget:
     label = QLabel(message)

@@ -13,17 +13,20 @@ freezing. If the key still can't be recovered it lands on a graceful
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
   QAbstractItemView,
   QApplication,
+  QFileDialog,
   QHBoxLayout,
   QHeaderView,
   QLabel,
   QLineEdit,
+  QMessageBox,
   QProgressBar,
+  QProgressDialog,
   QPushButton,
   QStackedWidget,
   QTableWidget,
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ...utils.spak import SpakPasswordError
 from ...vfs import Resource, SpakSource
+from .extract import DECRYPTING_LABEL, extract_spak_entries
 from .registry import ContentContext
 
 # Strong refs to running workers so they aren't GC'd mid-run even if
@@ -125,6 +129,38 @@ class _MountWorker(QThread):
       self.mounted.emit(source)
 
 
+class _ExtractWorker(QThread):
+  """Extract every entry of a mounted `.spak` to a folder, off the UI
+  thread (decoding each `.edt`/`.dat` entry to CSV isn't free over a
+  large archive)."""
+
+  progress = Signal(int, int, str)  # done, total, current entry name
+  done = Signal(list)  # entry names that failed
+
+  def __init__(self, source: SpakSource, names: List[str], dest: Path) -> None:
+    super().__init__()
+    self._source = source
+    self._names = names
+    self._dest = dest
+    self._cancelled = False
+
+  def cancel(self) -> None:
+    self._cancelled = True
+
+  def run(self) -> None:
+    # `.primary`, not the `SpakSource` wrapper: reading it directly
+    # skips the source's read cache, which would otherwise keep every
+    # decrypted entry in memory for the tab's lifetime.
+    failures = extract_spak_entries(
+      self._source.primary,
+      self._names,
+      self._dest,
+      on_progress=lambda i, total, name: self.progress.emit(i, total, name),
+      should_cancel=lambda: self._cancelled,
+    )
+    self.done.emit(failures)
+
+
 class SpakView(QWidget):
   """Loading -> browser / key panel / error, over one .spak."""
 
@@ -137,6 +173,7 @@ class SpakView(QWidget):
     # browser tab itself is closed.
     self._source: Optional[SpakSource] = None
     self._mount: Optional[_MountWorker] = None
+    self._extract_worker: Optional[_ExtractWorker] = None
 
     self._stack = QStackedWidget()
     layout = QVBoxLayout(self)
@@ -192,9 +229,14 @@ class SpakView(QWidget):
     self._search.setPlaceholderText("Filter files…")
     self._search.setClearButtonEnabled(True)
     self._search.textChanged.connect(self._filter)
+    self._extract_btn = QPushButton("Extract All…")
+    self._extract_btn.setObjectName("spakExtractButton")
+    self._extract_btn.setToolTip("Decrypt every file into a folder on your computer")
+    self._extract_btn.clicked.connect(self._extract_all)
     bar.addWidget(self._count)
     bar.addStretch(1)
     bar.addWidget(self._search, stretch=1)
+    bar.addWidget(self._extract_btn)
 
     self._table = QTableWidget(0, 3)
     self._table.setObjectName("spakTable")
@@ -334,3 +376,63 @@ class SpakView(QWidget):
       return
     name = self._table.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
     self._ctx.open_file(Resource(self._source, name))
+
+  # ── extract all ────────────────────────────────────────────────
+
+  def _extract_all(self) -> None:
+    if self._source is None or self._extract_worker is not None:
+      return
+    start = (
+      str(self._ctx.output_dir) if self._ctx.output_dir else str(self._path.parent)
+    )
+    chosen = QFileDialog.getExistingDirectory(self, "Extract Archive To", start)
+    if not chosen:
+      return
+    dest = Path(chosen) / self._path.stem
+    dest.mkdir(parents=True, exist_ok=True)
+    names = self._source.primary_names()
+
+    progress = QProgressDialog("Extracting…", "Cancel", 0, max(len(names), 1), self)
+    progress.setWindowTitle("Extract Archive")
+    progress.setWindowModality(Qt.WindowModality.WindowModal)
+    progress.setMinimumDuration(0)
+    progress.setValue(0)
+
+    worker = _ExtractWorker(self._source, names, dest)
+    worker.progress.connect(lambda done, total, name: self._on_extract_progress(
+      progress, done, total, name
+    ))
+    worker.done.connect(
+      lambda failures: self._on_extract_done(progress, dest, failures)
+    )
+    progress.canceled.connect(worker.cancel)
+
+    self._extract_btn.setEnabled(False)
+    self._extract_worker = worker
+    _track(worker)
+
+  def _on_extract_progress(
+    self, progress: QProgressDialog, done: int, total: int, name: str
+  ) -> None:
+    if progress.wasCanceled():
+      return
+    progress.setMaximum(total)
+    progress.setValue(done)
+    # The decrypt phase reports its own label directly rather than a
+    # per-entry name -- show it as-is, no "Extracting " prefix.
+    progress.setLabelText(name if name == DECRYPTING_LABEL else f"Extracting {name}")
+
+  def _on_extract_done(
+    self, progress: QProgressDialog, dest: Path, failures: List[str]
+  ) -> None:
+    progress.close()
+    self._extract_btn.setEnabled(True)
+    self._extract_worker = None
+    if failures:
+      QMessageBox.warning(
+        self,
+        "Extract Archive",
+        f"Extracted to {dest}\n\n{len(failures)} file(s) failed to extract.",
+      )
+    else:
+      QMessageBox.information(self, "Extract Archive", f"Extracted to {dest}")

@@ -102,6 +102,27 @@ QFrame#recentRow:hover {{ background: {TAB_HOVER}; }}
 QLabel#recentName {{ color: {TEXT}; font-size: 13px; }}
 QLabel#recentPath {{ color: {FAINT}; font-size: 11px; font-family: {MONO_STACK}; }}
 
+/* Content tab header (Extract) -------------------------------- */
+QWidget#contentHeader {{
+  background: {TAB_STRIP};
+  border-bottom: 1px solid {BORDER};
+}}
+QPushButton#extractButton, QPushButton#spakExtractButton {{
+  color: {TEXT};
+  background: {TAB_INACTIVE};
+  border: 1px solid {BORDER};
+  border-radius: 5px;
+  padding: 5px 14px;
+  font-size: 12px;
+}}
+QPushButton#extractButton:hover, QPushButton#spakExtractButton:hover {{
+  border-color: {ACCENT};
+}}
+QPushButton#extractButton:disabled, QPushButton#spakExtractButton:disabled {{
+  color: {FAINT};
+  border-color: {TAB_INACTIVE};
+}}
+
 /* Content placeholder ---------------------------------------- */
 QLabel#contentPlaceholder {{ color: {MUTED}; font-size: 13px; }}
 QLabel#errorHeading {{ color: {ACCENT}; font-size: 14px; font-weight: bold; }}
